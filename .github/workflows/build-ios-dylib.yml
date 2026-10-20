@@ -1,0 +1,38 @@
+name: Build iOS KeyHub Gate dylib
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/KeyHubGate.m'
+      - '.github/workflows/build-ios-dylib.yml'
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build unsigned iOS device dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -arch arm64 -target arm64-apple-ios17.0 \
+            -isysroot "$SDK" -miphoneos-version-min=17.0 \
+            -fobjc-arc -fblocks -O2 -dynamiclib \
+            -Wno-deprecated-declarations \
+            -install_name '@rpath/KeyHubGate.dylib' \
+            src/KeyHubGate.m -framework Foundation -framework UIKit \
+            -framework Security -o dist/KeyHubGate.dylib
+          file dist/KeyHubGate.dylib
+          xcrun vtool -show-build dist/KeyHubGate.dylib
+      - name: Package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyHubGate-iOS17-arm64-unsigned
+          path: dist/KeyHubGate.dylib
+          if-no-files-found: error
