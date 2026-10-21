@@ -35,8 +35,6 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 @interface KHGate : NSObject
 @property(nonatomic,strong) UIWindow *gateWindow;
 @property(nonatomic,strong) UILabel *statusLabel;
-@property(nonatomic,strong) UITextField *emailField;
-@property(nonatomic,strong) UITextField *passwordField;
 @property(nonatomic,strong) UITextField *licenseField;
 @property(nonatomic,strong) UIButton *activationButton;
 @property(nonatomic,assign) BOOL busy;
@@ -116,20 +114,15 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     root.view.backgroundColor = [UIColor systemBackgroundColor];
     window.rootViewController = root;
 
-    UILabel *title = [self label:@"Kich hoat KeyHub" fontSize:27 bold:YES];
-    UILabel *help = [self label:@"Nhap tai khoan KeyHub va ma License de kich hoat ung dung." fontSize:14 bold:NO];
+    UILabel *title = [self label:@"Kích hoạt KeyHub" fontSize:27 bold:YES];
+    UILabel *help = [self label:@"Chỉ cần nhập License Key để kích hoạt ứng dụng. Không cần đăng nhập." fontSize:14 bold:NO];
     help.textColor = [UIColor secondaryLabelColor];
-    self.statusLabel = [self label:@"Dang kiem tra License..." fontSize:14 bold:NO];
+    self.statusLabel = [self label:@"Đang kiểm tra License..." fontSize:14 bold:NO];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
-    self.emailField = [self entry:@"Email KeyHub" secure:NO];
-    self.emailField.keyboardType = UIKeyboardTypeEmailAddress;
-    self.emailField.textContentType = UITextContentTypeUsername;
-    self.passwordField = [self entry:@"Mat khau KeyHub" secure:YES];
-    self.passwordField.textContentType = UITextContentTypePassword;
-    self.licenseField = [self entry:@"License Key (IKS-...)" secure:NO];
+    self.licenseField = [self entry:@"Nhập License Key (IKS-...)" secure:NO];
     self.licenseField.textContentType = UITextContentTypeOneTimeCode;
     UIButton *activate = [UIButton buttonWithType:UIButtonTypeSystem];
-    [activate setTitle:@"Kich hoat" forState:UIControlStateNormal];
+    [activate setTitle:@"Kích hoạt" forState:UIControlStateNormal];
     activate.titleLabel.font = [UIFont boldSystemFontOfSize:18];
     activate.backgroundColor = [UIColor systemBlueColor];
     [activate setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
@@ -139,7 +132,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     self.activationButton = activate;
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        title, help, self.emailField, self.passwordField, self.licenseField, activate, self.statusLabel
+        title, help, self.licenseField, activate, self.statusLabel
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 14;
@@ -161,8 +154,6 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 }
 
 - (void)setInputsEnabled:(BOOL)enabled {
-    self.emailField.enabled = enabled;
-    self.passwordField.enabled = enabled;
     self.licenseField.enabled = enabled;
     self.activationButton.enabled = enabled;
     self.activationButton.alpha = enabled ? 1 : .6;
@@ -207,11 +198,11 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
             else [self lockUIWithStatus:message ?: @"Key het han, bi thu hoi hoac khong hop le."];
         }];
     } else {
-        [self lockUIWithStatus:@"Chua kich hoat. Can email, mat khau va License Key."];
+        [self lockUIWithStatus:@"Chưa kích hoạt. Chỉ cần nhập License Key."];
     }
 }
 
-- (void)post:(NSString *)path data:(NSDictionary *)payload bearer:(NSString *)token
+- (void)post:(NSString *)path data:(NSDictionary *)payload
   completion:(void (^)(NSDictionary * _Nullable json, NSString * _Nullable err))completion {
     NSError *serializeError = nil;
     NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&serializeError];
@@ -222,7 +213,6 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     r.HTTPBody = body;
     r.timeoutInterval = 100; // Render free tier may cold-start for 50+ sec.
     [r setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    if (token.length) [r setValue:[@"Bearer " stringByAppendingString:token] forHTTPHeaderField:@"Authorization"];
     NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:r completionHandler:
         ^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
             NSString *failure = nil;
@@ -255,7 +245,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     NSString *device = [self deviceID];
     if (!device.length) { completion(NO, @"Khong the luu Device ID trong Keychain."); return; }
     self.busy = YES;
-    [self post:@"/keys/verify" data:@{@"key":license, @"device_id":device, @"label":@"iPhone"} bearer:nil
+    [self post:@"/keys/verify" data:@{@"key":license, @"device_id":device, @"label":@"iPhone"}
       completion:^(NSDictionary *json, NSString *error) {
           self.busy = NO;
           BOOL valid = !error && [json[@"valid"] boolValue];
@@ -266,46 +256,39 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 - (void)activateTapped:(id)sender {
     (void)sender;
     if (self.busy) return;
-    NSString *email = [self.emailField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *password = self.passwordField.text ?: @"";
     NSString *license = [self.licenseField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (![email containsString:@"@"] || !password.length || license.length < 30) {
-        [self updateStatus:@"Nhap email, mat khau va ma License hop le."];
+    if (license.length < 30) {
+        [self updateStatus:@"Vui lòng nhập License Key hợp lệ."];
         return;
     }
     NSString *device = [self deviceID];
-    if (!device.length) { [self updateStatus:@"Khong the luu Device ID trong Keychain."]; return; }
+    if (!device.length) { [self updateStatus:@"Không thể lưu mã thiết bị trong Keychain."]; return; }
+
     self.busy = YES;
     [self setInputsEnabled:NO];
-    [self updateStatus:@"Dang dang nhap KeyHub..."];
-    [self post:@"/auth/login" data:@{@"email":email, @"password":password} bearer:nil
-      completion:^(NSDictionary *auth, NSString *err) {
-          NSString *token = auth[@"access_token"];
-          if (err || ![token isKindOfClass:[NSString class]]) {
-              self.busy = NO; [self setInputsEnabled:YES];
-              [self updateStatus:err ?: @"Dang nhap that bai."];
+    [self updateStatus:@"Đang kích hoạt License..."];
+    [self post:@"/keys/activate-with-key"
+          data:@{@"key":license, @"device_id":device, @"label":@"iPhone"}
+      completion:^(NSDictionary *result, NSString *error) {
+          self.busy = NO;
+          if (error || ![result[@"valid"] boolValue]) {
+              [self setInputsEnabled:YES];
+              [self updateStatus:error ?: @"License không hợp lệ."];
               return;
           }
-          [self updateStatus:@"Dang kich hoat License..."];
-          [self post:@"/keys/activate" data:@{@"key":license, @"device_id":device, @"label":@"iPhone"} bearer:token
-            completion:^(NSDictionary *activated, NSString *error) {
-                (void)activated;
-                self.busy = NO;
-                self.passwordField.text = @"";
-                if (error) { [self setInputsEnabled:YES]; [self updateStatus:error]; return; }
-                if (!KHWriteSecret(KHLicenseAccount, license)) {
-                    [self setInputsEnabled:YES];
-                    [self updateStatus:@"Keychain that bai. Khong luu duoc License."];
-                    return;
-                }
-                [self updateStatus:@"Da kich hoat. Dang xac minh..."];
-                [self verifyLicense:license completion:^(BOOL valid, NSString *msg) {
-                    if (valid) [self unlock];
-                    else [self lockUIWithStatus:msg];
-                }];
-            }];
+          if (!KHWriteSecret(KHLicenseAccount, license)) {
+              [self setInputsEnabled:YES];
+              [self updateStatus:@"Không thể lưu License vào Keychain."];
+              return;
+          }
+          [self updateStatus:@"Đã kích hoạt. Đang xác minh..."];
+          [self verifyLicense:license completion:^(BOOL valid, NSString *message) {
+              if (valid) [self unlock];
+              else [self lockUIWithStatus:message ?: @"License không hợp lệ."];
+          }];
       }];
 }
+
 @end
 
 // Called when an injector actually loads this Mach-O dylib into the app process.
