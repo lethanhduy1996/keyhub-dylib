@@ -37,6 +37,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 @property(nonatomic,strong) UILabel *statusLabel;
 @property(nonatomic,strong) UITextField *licenseField;
 @property(nonatomic,strong) UIButton *activationButton;
+@property(nonatomic,strong) UIActivityIndicatorView *loadingIndicator;
 @property(nonatomic,assign) BOOL busy;
 @property(nonatomic,assign) BOOL unlocked;
 @property(nonatomic,assign) BOOL activationCompleted;
@@ -61,6 +62,8 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 - (void)applicationDidBecomeActive:(NSNotification *)note {
     (void)note;
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Do not interrupt the brief activation-success screen.
+        if (self.activationCompleted) return;
         self.unlocked = NO;
         [self showIfNeeded];
     });
@@ -131,12 +134,20 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     [activate addTarget:self action:@selector(activateTapped:) forControlEvents:UIControlEventTouchUpInside];
     self.activationButton = activate;
 
+    UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc]
+        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+    spinner.color = [UIColor systemBlueColor];
+    spinner.hidesWhenStopped = YES;
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    self.loadingIndicator = spinner;
+
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        title, help, self.licenseField, activate, self.statusLabel
+        title, help, self.licenseField, activate, spinner, self.statusLabel
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 14;
     stack.distribution = UIStackViewDistributionFill;
+    stack.alignment = UIStackViewAlignmentFill;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     [root.view addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
@@ -153,6 +164,47 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     self.statusLabel.text = message;
 }
 
+- (NSString *)expirationTextFromJSON:(NSDictionary *)json {
+    id value = json[@"expires_at"];
+    if (![value isKindOfClass:[NSNumber class]]) return nil;
+    NSTimeInterval timestamp = [value doubleValue];
+    if (timestamp <= 0) return nil;
+    NSDateFormatter *formatter = [NSDateFormatter new];
+    formatter.dateFormat = @"dd/MM/yyyy HH:mm";
+    formatter.timeZone = [NSTimeZone timeZoneWithName:@"Asia/Ho_Chi_Minh"];
+    formatter.locale = [NSLocale localeWithLocaleIdentifier:@"vi_VN"];
+    return [NSString stringWithFormat:@"Hết hạn: %@ (giờ Việt Nam)",
+            [formatter stringFromDate:[NSDate dateWithTimeIntervalSince1970:timestamp]]];
+}
+
+- (void)beginLoading:(NSString *)message {
+    [self setInputsEnabled:NO];
+    [self.loadingIndicator startAnimating];
+    self.statusLabel.textColor = [UIColor secondaryLabelColor];
+    [self updateStatus:message];
+}
+
+- (void)stopLoading {
+    [self.loadingIndicator stopAnimating];
+}
+
+- (void)showActivationSuccess:(NSString *)expiryText {
+    self.activationCompleted = YES;
+    [self stopLoading];
+    [self setInputsEnabled:NO];
+    self.statusLabel.textColor = [UIColor systemGreenColor];
+    NSString *expiration = expiryText.length ? expiryText :
+        @"Máy chủ chưa cung cấp ngày hết hạn.";
+    [self updateStatus:[NSString stringWithFormat:
+        @"✓ Kích hoạt thành công!\n%@\nĐang mở ứng dụng...", expiration]];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (!self.activationCompleted) return;
+        self.activationCompleted = NO;
+        [self unlock];
+    });
+}
+
 - (void)setInputsEnabled:(BOOL)enabled {
     self.licenseField.enabled = enabled;
     self.activationButton.enabled = enabled;
@@ -161,8 +213,11 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 
 - (void)lockUIWithStatus:(NSString *)status {
     self.unlocked = NO;
+    self.activationCompleted = NO;
+    [self stopLoading];
     self.gateWindow.hidden = NO;
     [self.gateWindow makeKeyAndVisible];
+    self.statusLabel.textColor = [UIColor secondaryLabelColor];
     [self updateStatus:status];
     [self setInputsEnabled:YES];
 }
@@ -180,7 +235,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 }
 
 - (void)showIfNeeded {
-    if (self.unlocked || self.busy) return;
+    if (self.unlocked || self.busy || self.activationCompleted) return;
     if (![self foregroundScene]) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ [self showIfNeeded]; });
@@ -191,11 +246,11 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     [self.gateWindow makeKeyAndVisible];
     NSString *existingLicense = KHReadSecret(KHLicenseAccount);
     if (existingLicense.length) {
-        [self setInputsEnabled:NO];
-        [self updateStatus:@"Dang kiem tra License voi may chu..."];
+        [self beginLoading:@"Đang xác minh License với máy chủ..."];
         [self verifyLicense:existingLicense completion:^(BOOL valid, NSString *message) {
+            [self stopLoading];
             if (valid) [self unlock];
-            else [self lockUIWithStatus:message ?: @"Key het han, bi thu hoi hoac khong hop le."];
+            else [self lockUIWithStatus:message ?: @"Key đã hết hạn, bị thu hồi hoặc không hợp lệ."];
         }];
     } else {
         [self lockUIWithStatus:@"Chưa kích hoạt. Chỉ cần nhập License Key."];
@@ -249,7 +304,10 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
       completion:^(NSDictionary *json, NSString *error) {
           self.busy = NO;
           BOOL valid = !error && [json[@"valid"] boolValue];
-          completion(valid, error ?: (valid ? @"Hop le" : @"License chua kich hoat hoac da het han."));
+          NSString *expires = valid ? [self expirationTextFromJSON:json] : nil;
+          completion(valid, error ?: (valid
+              ? (expires ?: @"Máy chủ chưa cung cấp ngày hết hạn.")
+              : @"License chưa kích hoạt, đã thu hồi hoặc hết hạn."));
       }];
 }
 
@@ -265,26 +323,32 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     if (!device.length) { [self updateStatus:@"Không thể lưu mã thiết bị trong Keychain."]; return; }
 
     self.busy = YES;
-    [self setInputsEnabled:NO];
-    [self updateStatus:@"Đang kích hoạt License..."];
+    [self beginLoading:@"Đang kiểm tra và kích hoạt License..."];
     [self post:@"/keys/activate-with-key"
           data:@{@"key":license, @"device_id":device, @"label":@"iPhone"}
       completion:^(NSDictionary *result, NSString *error) {
           self.busy = NO;
           if (error || ![result[@"valid"] boolValue]) {
+              [self stopLoading];
               [self setInputsEnabled:YES];
               [self updateStatus:error ?: @"License không hợp lệ."];
               return;
           }
           if (!KHWriteSecret(KHLicenseAccount, license)) {
+              [self stopLoading];
               [self setInputsEnabled:YES];
               [self updateStatus:@"Không thể lưu License vào Keychain."];
               return;
           }
-          [self updateStatus:@"Đã kích hoạt. Đang xác minh..."];
+          NSString *activatedExpiry = [self expirationTextFromJSON:result];
+          [self updateStatus:@"Đã kích hoạt. Đang xác minh lần cuối..."];
           [self verifyLicense:license completion:^(BOOL valid, NSString *message) {
-              if (valid) [self unlock];
-              else [self lockUIWithStatus:message ?: @"License không hợp lệ."];
+              if (valid) {
+                  NSString *verifiedExpiry = [message hasPrefix:@"Hết hạn:"] ? message : nil;
+                  [self showActivationSuccess:verifiedExpiry ?: activatedExpiry];
+              } else {
+                  [self lockUIWithStatus:message ?: @"License không hợp lệ."];
+              }
           }];
       }];
 }
