@@ -1,0 +1,18 @@
+name: iOS Activation UI checks
+
+on:
+  push:
+    branches: [feature/activation-spinner-expiry]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ios-objc-syntax:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Objective-C using iOS SDK
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          xcrun --sdk iphoneos clang -target arm64-apple-ios17.0 -isysroot "$SDK" -fobjc-arc -fmodules -fsyntax-only src/KeyHubGate.m
