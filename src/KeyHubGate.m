@@ -119,7 +119,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     help.textColor = [UIColor secondaryLabelColor];
     self.statusLabel = [self label:@"Đang kiểm tra License..." fontSize:14 bold:NO];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
-    self.licenseField = [self entry:@"Nhập License Key (IKS-...)" secure:NO];
+    self.licenseField = [self entry:@"Nhập Key duyle-... hoặc IKS-..." secure:NO];
     self.licenseField.textContentType = UITextContentTypeOneTimeCode;
     UIButton *activate = [UIButton buttonWithType:UIButtonTypeSystem];
     [activate setTitle:@"Kích hoạt" forState:UIControlStateNormal];
