@@ -38,6 +38,8 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 @property(nonatomic,strong) UITextField *licenseField;
 @property(nonatomic,strong) UIButton *activationButton;
 @property(nonatomic,strong) UIActivityIndicatorView *loadingIndicator;
+@property(nonatomic,strong) UIView *loadingContainer;
+@property(nonatomic,assign) CFAbsoluteTime loadingStartedAt;
 @property(nonatomic,assign) BOOL busy;
 @property(nonatomic,assign) BOOL unlocked;
 @property(nonatomic,assign) BOOL activationCompleted;
@@ -134,15 +136,26 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     [activate addTarget:self action:@selector(activateTapped:) forControlEvents:UIControlEventTouchUpInside];
     self.activationButton = activate;
 
+    // A centered, full-width row makes progress obvious on smaller iPhones.
+    UIView *loadingRow = [UIView new];
+    loadingRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [loadingRow.heightAnchor constraintEqualToConstant:58].active = YES;
     UIActivityIndicatorView *spinner = [[UIActivityIndicatorView alloc]
-        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
+        initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
     spinner.color = [UIColor systemBlueColor];
     spinner.hidesWhenStopped = YES;
     spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [loadingRow addSubview:spinner];
+    [NSLayoutConstraint activateConstraints:@[
+        [spinner.centerXAnchor constraintEqualToAnchor:loadingRow.centerXAnchor],
+        [spinner.centerYAnchor constraintEqualToAnchor:loadingRow.centerYAnchor],
+    ]];
+    loadingRow.hidden = YES;
+    self.loadingContainer = loadingRow;
     self.loadingIndicator = spinner;
 
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        title, help, self.licenseField, activate, spinner, self.statusLabel
+        title, help, self.licenseField, activate, loadingRow, self.statusLabel
     ]];
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 14;
@@ -178,30 +191,46 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 }
 
 - (void)beginLoading:(NSString *)message {
+    self.loadingStartedAt = CFAbsoluteTimeGetCurrent();
     [self setInputsEnabled:NO];
+    self.loadingContainer.hidden = NO;
     [self.loadingIndicator startAnimating];
+    [self.activationButton setTitle:@"Đang kiểm tra…" forState:UIControlStateNormal];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
     [self updateStatus:message];
 }
 
 - (void)stopLoading {
     [self.loadingIndicator stopAnimating];
+    self.loadingContainer.hidden = YES;
+    [self.activationButton setTitle:@"Kích hoạt" forState:UIControlStateNormal];
 }
 
-- (void)showActivationSuccess:(NSString *)expiryText {
+- (void)showLicenseSuccess:(NSString *)expiryText newlyActivated:(BOOL)isNew {
+    // Keep the spinner visible for at least 0.7 seconds even with a fast API.
     self.activationCompleted = YES;
-    [self stopLoading];
-    [self setInputsEnabled:NO];
-    self.statusLabel.textColor = [UIColor systemGreenColor];
-    NSString *expiration = expiryText.length ? expiryText :
-        @"Máy chủ chưa cung cấp ngày hết hạn.";
-    [self updateStatus:[NSString stringWithFormat:
-        @"✓ Kích hoạt thành công!\n%@\nĐang mở ứng dụng...", expiration]];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.8 * NSEC_PER_SEC)),
+    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - self.loadingStartedAt;
+    NSTimeInterval remaining = MAX(0.0, 0.7 - elapsed);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (!self.activationCompleted) return;
-        self.activationCompleted = NO;
-        [self unlock];
+        [self stopLoading];
+        [self setInputsEnabled:NO];
+        self.statusLabel.textColor = [UIColor systemGreenColor];
+        NSString *expiration = expiryText.length ? expiryText :
+            @"Máy chủ chưa cung cấp ngày hết hạn.";
+        NSString *headline = isNew ? @"✓ Kích hoạt thành công!"
+                                   : @"✓ License đã được xác minh!";
+        [self updateStatus:[NSString stringWithFormat:
+            @"%@\n%@\nĐang mở ứng dụng...", headline, expiration]];
+        NSTimeInterval visibleSeconds = isNew ? 2.8 : 1.8;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                       (int64_t)(visibleSeconds * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (!self.activationCompleted) return;
+            self.activationCompleted = NO;
+            [self unlock];
+        });
     });
 }
 
@@ -248,9 +277,12 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     if (existingLicense.length) {
         [self beginLoading:@"Đang xác minh License với máy chủ..."];
         [self verifyLicense:existingLicense completion:^(BOOL valid, NSString *message) {
-            [self stopLoading];
-            if (valid) [self unlock];
-            else [self lockUIWithStatus:message ?: @"Key đã hết hạn, bị thu hồi hoặc không hợp lệ."];
+            if (valid) {
+                NSString *expiry = [message hasPrefix:@"Hết hạn:"] ? message : nil;
+                [self showLicenseSuccess:expiry newlyActivated:NO];
+            } else {
+                [self lockUIWithStatus:message ?: @"Key đã hết hạn, bị thu hồi hoặc không hợp lệ."];
+            }
         }];
     } else {
         [self lockUIWithStatus:@"Chưa kích hoạt. Chỉ cần nhập License Key."];
@@ -322,6 +354,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     NSString *device = [self deviceID];
     if (!device.length) { [self updateStatus:@"Không thể lưu mã thiết bị trong Keychain."]; return; }
 
+    [self.licenseField resignFirstResponder];
     self.busy = YES;
     [self beginLoading:@"Đang kiểm tra và kích hoạt License..."];
     [self post:@"/keys/activate-with-key"
@@ -345,7 +378,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
           [self verifyLicense:license completion:^(BOOL valid, NSString *message) {
               if (valid) {
                   NSString *verifiedExpiry = [message hasPrefix:@"Hết hạn:"] ? message : nil;
-                  [self showActivationSuccess:verifiedExpiry ?: activatedExpiry];
+                  [self showLicenseSuccess:verifiedExpiry ?: activatedExpiry newlyActivated:YES];
               } else {
                   [self lockUIWithStatus:message ?: @"License không hợp lệ."];
               }
