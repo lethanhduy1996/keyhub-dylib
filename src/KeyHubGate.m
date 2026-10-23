@@ -43,6 +43,8 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 @property(nonatomic,assign) BOOL busy;
 @property(nonatomic,assign) BOOL unlocked;
 @property(nonatomic,assign) BOOL activationCompleted;
+@property(nonatomic,assign) BOOL transientVerificationFailure;
+@property(nonatomic,assign) BOOL canRetrySavedLicense;
 + (instancetype)shared;
 - (void)start;
 @end
@@ -209,6 +211,8 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
 - (void)showLicenseSuccess:(NSString *)expiryText newlyActivated:(BOOL)isNew {
     // Keep the spinner visible for at least 0.7 seconds even with a fast API.
     self.activationCompleted = YES;
+    self.canRetrySavedLicense = NO;
+    self.transientVerificationFailure = NO;
     CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - self.loadingStartedAt;
     NSTimeInterval remaining = MAX(0.0, 0.7 - elapsed);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)),
@@ -247,12 +251,19 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     self.gateWindow.hidden = NO;
     [self.gateWindow makeKeyAndVisible];
     self.statusLabel.textColor = [UIColor secondaryLabelColor];
-    [self updateStatus:status];
+    self.canRetrySavedLicense = self.transientVerificationFailure &&
+        KHReadSecret(KHLicenseAccount).length > 0;
+    [self updateStatus:self.canRetrySavedLicense
+        ? [NSString stringWithFormat:@"%@\nKey vẫn được lưu. Nhấn Thử lại khi có mạng.", status]
+        : status];
     [self setInputsEnabled:YES];
+    [self.activationButton setTitle:(self.canRetrySavedLicense
+        ? @"Thử lại" : @"Kích hoạt") forState:UIControlStateNormal];
 }
 
 - (void)unlock {
     self.unlocked = YES;
+    self.canRetrySavedLicense = NO;
     self.gateWindow.hidden = YES;
     // Restore focus to the app's window if possible.
     for (UIWindow *window in [self foregroundScene].windows) {
@@ -304,7 +315,7 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
         ^(NSData * _Nullable data, NSURLResponse * _Nullable response, NSError * _Nullable error) {
             NSString *failure = nil;
             NSDictionary *json = nil;
-            if (error) failure = @"Khong ket noi duoc API. Thu lai khi co mang.";
+            if (error) failure = @"Không kết nối được máy chủ KeyHub.";
             if (data.length) {
                 id obj = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
                 if ([obj isKindOfClass:[NSDictionary class]]) json = obj;
@@ -335,6 +346,15 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     [self post:@"/keys/verify" data:@{@"key":license, @"device_id":device, @"label":@"iPhone"}
       completion:^(NSDictionary *json, NSString *error) {
           self.busy = NO;
+          // Only transient network/server failures permit a one-tap retry.
+          // A revoked, expired or unregistered License never unlocks offline.
+          self.transientVerificationFailure = error &&
+              ([error hasPrefix:@"Không kết nối được máy chủ"]
+               || [error containsString:@"HTTP 408"]
+               || [error containsString:@"HTTP 429"]
+               || [error containsString:@"HTTP 502"]
+               || [error containsString:@"HTTP 503"]
+               || [error containsString:@"HTTP 504"]);
           BOOL valid = !error && [json[@"valid"] boolValue];
           NSString *expires = valid ? [self expirationTextFromJSON:json] : nil;
           completion(valid, error ?: (valid
@@ -347,6 +367,23 @@ static BOOL KHWriteSecret(NSString *account, NSString *value) {
     (void)sender;
     if (self.busy) return;
     NSString *license = [self.licenseField.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSString *savedLicense = KHReadSecret(KHLicenseAccount);
+    if (self.canRetrySavedLicense && savedLicense.length &&
+        (!license.length || [license isEqualToString:savedLicense])) {
+        // Web logout does not touch the License stored in iOS Keychain.
+        // After a Render cold start or network outage, re-verify this key.
+        self.canRetrySavedLicense = NO;
+        [self beginLoading:@"Đang kết nối lại máy chủ KeyHub..."];
+        [self verifyLicense:savedLicense completion:^(BOOL valid, NSString *message) {
+            if (valid) {
+                NSString *expiry = [message hasPrefix:@"Hết hạn:"] ? message : nil;
+                [self showLicenseSuccess:expiry newlyActivated:NO];
+            } else {
+                [self lockUIWithStatus:message ?: @"Không xác minh được Key."];
+            }
+        }];
+        return;
+    }
     if (license.length < 30) {
         [self updateStatus:@"Vui lòng nhập License Key hợp lệ."];
         return;
